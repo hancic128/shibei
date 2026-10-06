@@ -1,0 +1,29 @@
+{
+  "name": "shibei",
+  "version": "1.0.0",
+  "description": "**面向独立开发者的社区情报工具**：从 V2EX 等社区抓取帖子，调用 LLM 提炼**产品创意 / 用户痛点 / 潜在机会**，输出带可点击来源链接的 Markdown 报告，帮你低成本发现「值得做的东西」。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hancic128/shibei.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/hancic128/shibei/issues"
+  },
+  "homepage": "https://github.com/hancic128/shibei#readme",
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}
