@@ -92,7 +92,8 @@ _EVALUATION_DEFAULTS: dict[str, Any] = {
 }
 
 # 创意条目评分字段：v=价值(1-5)、d=难度(1-5)、✓ 红线 pass / ✗ 红线 concern
-ITEM_SCORE_RE = re.compile(r"\[v=(\d),d=(\d),([✓✗])\]")
+# 兼容不同模型的输出风格：`[v=4,d=2,✓]`（deepseek，无空格）与 `[v=4, d=2, ✓]`（部分模型带空格）。
+ITEM_SCORE_RE = re.compile(r"\[v\s*=\s*(\d)\s*,\s*d\s*=\s*(\d)\s*,\s*([✓✗])\]")
 
 
 def load_evaluation(config: dict[str, Any]) -> dict[str, Any]:
