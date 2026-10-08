@@ -781,6 +781,13 @@ def test_parse_item_score_handles_concern():
     assert v == 3
 
 
+def test_parse_item_score_tolerates_spaces_in_tag():
+    """部分模型（minmax m3 等）输出 `[v=4, d=2, ✓]` 带空格，应被正常解析。"""
+    v, d, r, rest = analyzer.parse_item_score("- [v=4, d=2, ✓] PII 脱敏 — [#1]")
+    assert (v, d, r) == (4, 2, "✓")
+    assert "PII 脱敏" in rest
+
+
 def test_parse_item_score_invalid_returns_zero():
     v, d, r, line = analyzer.parse_item_score("- 普通条目，没有评分 — [#1]")
     assert (v, d, r) == (0, 0, "?")
@@ -812,6 +819,17 @@ def test_categorize_items_splits_keep_watch_rejected():
     assert buckets["rejected"][0][2] == "✗"
     # unscored 原样保留整行
     assert "普通条目无评分" in buckets["unscored"][0][3]
+
+
+def test_categorize_items_tolerates_spaced_score_format():
+    """m3 类模型输出 `[v=4, d=2, ✓]` 带空格时，分桶与无空格格式一致。"""
+    text = "- [v=4, d=2, ✓] 头条 — [#1]\n- [v=3, d=2, ✓] 中等 — [#2]\n- [v=3, d=2, ✗] 红线 — [#3]\n"
+    buckets = analyzer.categorize_items(text, {"keep_threshold": 16})
+    # 总分: [4*4=16, 3*4=12, 0]
+    assert len(buckets["keep"]) == 1
+    assert len(buckets["watch"]) == 1
+    assert len(buckets["rejected"]) == 1
+    assert len(buckets["unscored"]) == 0  # 关键：m3 风格不应落进未评分桶
 
 
 def test_categorize_items_threshold_boundary():
