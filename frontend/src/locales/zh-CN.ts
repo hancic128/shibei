@@ -20,6 +20,10 @@ const zhCN = {
     unknown: "未知",
     showPassword: "显示密码",
     hidePassword: "隐藏密码",
+    prevPage: "上一页",
+    nextPage: "下一页",
+    pageRange: "第 {{start}}–{{end}} 条 / 共 {{total}} 条",
+    pageOf: "{{page}} / {{pageCount}}",
   },
   login: {
     title: "欢迎回来",

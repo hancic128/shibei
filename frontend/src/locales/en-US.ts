@@ -20,6 +20,10 @@ const enUS = {
     unknown: "Unknown",
     showPassword: "Show password",
     hidePassword: "Hide password",
+    prevPage: "Previous",
+    nextPage: "Next",
+    pageRange: "{{start}}–{{end}} of {{total}}",
+    pageOf: "{{page}} / {{pageCount}}",
   },
   login: {
     title: "Welcome back",
