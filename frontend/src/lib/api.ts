@@ -148,10 +148,10 @@ export const api = {
   stopTask: (id: string) =>
     request<{ ok: boolean }>(`/tasks/${encodeURIComponent(id)}/stop`, { method: "POST" }),
 
-  run: (mode: "today" | "full", lang: "zh" | "en") =>
+  run: (mode: "today" | "full" | "date", lang: "zh" | "en", date?: string) =>
     request<RunResponse>("/run", {
       method: "POST",
-      body: JSON.stringify({ mode, lang }),
+      body: JSON.stringify({ mode, lang, date }),
     }),
 
   tasks: () => request<TaskListResponse>("/tasks"),
@@ -162,6 +162,10 @@ export const api = {
 
   report: (name: string, lang: "zh" | "en" = "zh") =>
     request<ReportData>(`/reports/${encodeURIComponent(name)}?lang=${lang}`),
+
+  /** 删除某份报告（该日期的中英文版本一并移除，需登录） */
+  deleteReport: (name: string) =>
+    request<{ ok: boolean; removed: string[] }>(`/reports/${encodeURIComponent(name)}`, { method: "DELETE" }),
 
   reportLang: () => request<ReportLangConfig>("/report-lang"),
 

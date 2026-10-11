@@ -112,15 +112,17 @@ class TaskManager:
 
     # ---------- 启动 / 完成 ----------
 
-    def start(self, mode: str, env: dict[str, str]) -> dict[str, Any]:
+    def start(self, mode: str, env: dict[str, str], date: str | None = None) -> dict[str, Any]:
         """启动一个 analyzer 子进程任务。
 
-        mode: "today"（增量，默认行为）或 "full"（强制全量）。
+        mode: "today"（增量，默认行为）、"full"（强制全量）或 "date"（按日期历史重算，需 date）。
         env: 供 analyzer 使用的环境变量（已含 OPENAI_* 配置）。
         返回任务快照；已有任务运行中抛 TaskRunningError。
         """
-        if mode not in ("today", "full"):
+        if mode not in ("today", "full", "date"):
             raise ValueError(f"未知模式: {mode}")
+        if mode == "date" and not date:
+            raise ValueError("date 模式必须提供日期")
         with self._lock:
             if any(t.get("status") == "running" for t in self._tasks.values()):
                 raise TaskRunningError("已有分析任务在运行")
@@ -129,6 +131,7 @@ class TaskManager:
             task: dict[str, Any] = {
                 "id": task_id,
                 "mode": mode,
+                "date": date,
                 "lang": env.get("ANALYZE_LANG", "zh"),
                 "status": "running",
                 "started_at": _now(),
@@ -141,8 +144,9 @@ class TaskManager:
             self._save_index()
 
         log_fh = open(self.tasks_dir / f"{task_id}.log", "w", encoding="utf-8")
+        extra_args = ["--full"] if mode == "full" else (["--date", date] if mode == "date" and date else [])
         proc = subprocess.Popen(
-            [sys.executable, "-u", os.fspath(self.repo_root / "analyzer.py")] + (["--full"] if mode == "full" else []),
+            [sys.executable, "-u", os.fspath(self.repo_root / "analyzer.py")] + extra_args,
             cwd=self.repo_root,
             env=env,
             stdout=log_fh,

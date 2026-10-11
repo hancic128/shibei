@@ -1,5 +1,19 @@
 # 拾贝 · 项目状态
 
+## [2026-10-11] 历史报告可删除 / 可重跑（后台）
+
+### 现状
+- **需求**：历史报告可在后台删除或重跑。选定实现——「重跑」= 按日期用**已归档帖子**重算该天每日报告；入口**并入**管理总览页（`/admin`），不新开页面。
+- **analyzer.py**：新增 CLI `--date YYYY-MM-DD`（与 `--full` 互斥）。`regenerate_report()` 只读归档帖子（按 `created` 落在该本地日 `[00:00, 次日 00:00)` 过滤，次日零点用 `datetime + timedelta(days=1)` 求，避开 DST）、重新 LLM 分析、覆盖写回 `YYYY-MM-DD[.en].md`；**不抓取、不写 state**（不影响增量进度）。prompt 增量措辞经 `_PERIOD` 全局改用目标日期。`write_report` 改原子写（tmp + replace），并支持 `date` 参数。
+- **web**：`runner.TaskManager.start(mode, …)` 支持 `mode="date"`（argv 追加 `--date`，任务记录含 `date`）；`POST /api/run` 接受 `mode=date` 并严格校验日期；新增 `DELETE /api/reports/<name>`（需登录 + 同源，删该名全部语言版本，任务运行中返回 409）。`_report_list` / `report_detail` 对文件消失（与删除并发）容错。
+- **前端**：管理总览页新增「报告管理」卡片——列出报告（按基名合并 zh/en），每行「重跑 / 删除」按钮，删除走二次确认；语言徽标、更新时间、体积。`api.run` 支持 `date`，新增 `api.deleteReport`；`TaskItem.mode` 增 `date`；运行历史显示「按日重算」徽标。
+- 质量门：pytest **198 绿**（新增 analyzer 6、runner 4、web 5 用例）；`ruff check` / `ruff format --check` / `pyright` 0 错；前端 `tsc -b && vite build` 通过。
+
+### 下一步
+- 如需删除「单语言」而非整份报告，再评估（当前删除即移除该日期中英全部版本）。
+- 历史报告重跑依赖归档帖子仍在 `data/<来源>/<节点>/`；若数据被清理则重算结果为空（提示「没有已归档的帖子」）。
+- 其余见下条（09-16 遗留的部署凭据 + 09-13 的 V2EX 覆盖率）。
+
 ## [2026-09-16] 创意评估打分 + tag 触发部署（v0.5.0）
 
 ### 现状
