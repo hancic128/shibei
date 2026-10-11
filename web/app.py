@@ -70,6 +70,18 @@ DAILY_NAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 FULL_REPORT_NAME = "analysis"
 REPORT_FILE_RE = re.compile(r"^(analysis|\d{4}-\d{2}-\d{2})(?:\.(zh|en))?$")
 
+
+def _valid_daily_date(name: str) -> bool:
+    """严格校验 YYYY-MM-DD 且为真实日历日（拒绝 2024-02-30 这类）。"""
+    if not DAILY_NAME_RE.fullmatch(name):
+        return False
+    try:
+        time.strptime(name, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
+
+
 SESSION_TTL_DAYS = 7
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -272,7 +284,10 @@ def _report_list() -> list[dict[str, Any]]:
             continue
         base, lang = m.group(1), m.group(2) or "zh"
         kind = "full" if base == FULL_REPORT_NAME else "daily"
-        stat = path.stat()
+        try:
+            stat = path.stat()
+        except OSError:
+            continue  # 与删除并发：文件已消失，跳过
         item = {
             "name": base,
             "kind": kind,
@@ -530,12 +545,12 @@ def create_app() -> Flask:
             env["OPENAI_API_KEY"] = secrets_store.llm_api_key
         return env
 
-    def _start_task(mode: str, lang: str | None = None) -> dict[str, Any]:
+    def _start_task(mode: str, lang: str | None = None, date: str | None = None) -> dict[str, Any]:
         """组装环境并启动任务；未配 Key 抛 ApiKeyMissingError，运行中抛 TaskRunningError。"""
         env = _run_env(lang)
         if not env.get("OPENAI_API_KEY"):
             raise ApiKeyMissingError("尚未配置 LLM API Key")
-        return tasks.start(mode, env)
+        return tasks.start(mode, env, date)
 
     @app.post("/api/run")
     @require_login
@@ -543,8 +558,12 @@ def create_app() -> Flask:
     def run_task() -> Any:
         data = body_json()
         mode = data.get("mode", "today")
-        if mode not in ("today", "full"):
-            return jsonify({"error": "bad_mode", "message": "mode 需为 today 或 full"}), 400
+        if mode not in ("today", "full", "date"):
+            return jsonify({"error": "bad_mode", "message": "mode 需为 today、full 或 date"}), 400
+        # date 模式：按日期历史重算该天报告，需合法 YYYY-MM-DD
+        date = str(data.get("date", "")).strip()
+        if mode == "date" and not _valid_daily_date(date):
+            return jsonify({"error": "bad_date", "message": "date 需为合法的 YYYY-MM-DD"}), 400
         # lang 可选：调用方界面语言；非法值拒绝，合法值记住（定时任务无浏览器上下文，沿用它）
         lang = str(data.get("lang", "")).strip()
         if lang and lang not in web_settings.REPORT_LANGS:
@@ -552,7 +571,7 @@ def create_app() -> Flask:
         if lang:
             web_settings.save_report_lang(lang)
         try:
-            task = _start_task(mode, lang or None)
+            task = _start_task(mode, lang or None, date or None)
         except ApiKeyMissingError:
             return jsonify({"error": "no_api_key", "message": "尚未配置 LLM API Key，请先到「设置」完成 AI 配置"}), 400
         except TaskRunningError as e:
@@ -704,16 +723,44 @@ def create_app() -> Flask:
             rlang = "zh"
         suffix = ".en" if rlang == "en" else ""
         path = REPORT_DIR / f"{stem}{suffix}.md"
-        if not path.is_file():
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+            mtime = path.stat().st_mtime
+        except OSError:
             return jsonify({"error": "not_found", "message": "报告不存在，请先运行一次分析"}), 404
         return jsonify(
             {
                 "name": path.stem,
                 "language": rlang,
-                "updated_at": path.stat().st_mtime,
-                "content": path.read_text(encoding="utf-8", errors="replace"),
+                "updated_at": mtime,
+                "content": content,
             }
         )
+
+    @app.delete("/api/reports/<name>")
+    @require_login
+    @require_same_origin
+    def report_delete(name: str) -> Any:
+        # 删除某份报告的全部语言文件（YYYY-MM-DD.md / .en.md，或 analysis[.en].md）；
+        # 仅允许已知命名，拒绝路径穿越。任务运行中拒绝，避免边写边删。
+        stem = Path(name).name
+        if stem != FULL_REPORT_NAME and not _valid_daily_date(stem):
+            return jsonify({"error": "not_found", "message": "报告不存在"}), 404
+        if tasks.running():
+            return jsonify({"error": "task_running", "message": "分析任务运行中，暂不能删除报告"}), 409
+        removed: list[str] = []
+        for suffix in ("", ".en"):
+            path = REPORT_DIR / f"{stem}{suffix}.md"
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return jsonify({"error": "io_error", "message": "删除报告失败"}), 500
+            removed.append(path.name)
+        if not removed:
+            return jsonify({"error": "not_found", "message": "报告不存在"}), 404
+        return jsonify({"ok": True, "removed": removed})
 
     @app.get("/api/summary")
     @require_login

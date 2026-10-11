@@ -1219,3 +1219,95 @@ def test_analyze_no_token_print_when_disabled(env, monkeypatch, capsys):
     analyzer.analyze(topics, print_tokens=False)
     captured = capsys.readouterr()
     assert "token:" not in captured.out
+
+
+# ---------- 历史重算（--date） ----------
+
+_DAY = "2026-08-03"
+_RUN_CFG = {"sources": {"v2ex": {"enabled": True, "nodes": ["python"]}}, "evaluation": {"enabled": False}}
+
+
+def _write_dated_post(root, pid: str, created: int) -> None:
+    node = root / "data" / "v2ex" / "python"
+    node.mkdir(parents=True, exist_ok=True)
+    (node / f"{pid}.json").write_text(
+        json.dumps(
+            {
+                "id": pid,
+                "source": "v2ex",
+                "node": "python",
+                "title": f"标题{pid}",
+                "content": "正文",
+                "author": "u",
+                "created": created,
+                "replies_count": 0,
+                "url": f"https://example.com/{pid}",
+                "reply_list": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_parse_day_valid_and_invalid():
+    start, end = analyzer._parse_day(_DAY)
+    assert 86399 <= end - start <= 86401  # DST 日容忍
+    for bad in ("2026-8-3", "2026-02-30", "not-a-date", "2026-13-01"):
+        with pytest.raises(ValueError):
+            analyzer._parse_day(bad)
+
+
+def test_period_note_uses_target_date(monkeypatch):
+    monkeypatch.setattr(analyzer, "_PERIOD", _DAY)
+    assert _DAY in analyzer._period_note("zh", True)
+    assert _DAY in analyzer._period_note("en", True)
+    monkeypatch.setattr(analyzer, "_PERIOD", None)
+    assert analyzer._period_note("zh", True) == "（本次为今日新增分析）"
+    assert analyzer._period_note("en", True) == " (this is today's incremental analysis)"
+    assert analyzer._period_note("zh", False) == ""
+
+
+def test_report_stem_and_write_report_with_date(env):
+    assert analyzer.report_stem(True) == analyzer.time.strftime("%Y-%m-%d")
+    assert analyzer.report_stem(True, "en") == analyzer.time.strftime("%Y-%m-%d") + ".en"
+    assert analyzer.report_stem(False) == "analysis"
+    assert analyzer.report_stem(True, "zh", _DAY) == _DAY
+    assert analyzer.report_stem(True, "en", _DAY) == f"{_DAY}.en"
+
+    analyzer.write_report("正文", incremental=True, lang="zh", date=_DAY)
+    analyzer.write_report("body", incremental=True, lang="en", date=_DAY)
+    assert (analyzer.REPORT_DIR / f"{_DAY}.md").read_text(encoding="utf-8") == "正文\n"
+    assert (analyzer.REPORT_DIR / f"{_DAY}.en.md").read_text(encoding="utf-8") == "body\n"
+    assert not list(analyzer.REPORT_DIR.glob("*.tmp"))  # 原子写不留 .tmp
+
+
+def test_regenerate_report_filters_day_no_crawl_no_state(env, monkeypatch):
+    start, _ = analyzer._parse_day(_DAY)
+    _write_dated_post(env, "1", start - 1)  # 前一天 → 排除
+    _write_dated_post(env, "2", start + 10)  # 当天 → 保留
+    _write_dated_post(env, "3", start + 3600)  # 当天 → 保留
+    _write_dated_post(env, "4", start + 90000)  # 次日 → 排除
+
+    monkeypatch.setattr(analyzer, "call_api", lambda prompt, **kw: "## 产品创意\n- [#2] 洞察\n## 用户痛点\n## 潜在机会")
+    monkeypatch.setattr(analyzer, "run_crawl", lambda *a, **kw: pytest.fail("重算不应触发抓取"))
+
+    assert analyzer.regenerate_report(_DAY, _RUN_CFG) == 0
+
+    text = (analyzer.REPORT_DIR / f"{_DAY}.md").read_text(encoding="utf-8")
+    assert text.startswith(f"# {_DAY}")
+    assert "基于 2 个帖子" in text
+    assert "来源: v2ex(python)" in text
+    assert not analyzer.STATE_FILE.exists()  # 不更新增量进度
+    assert analyzer._PERIOD is None  # 全局已复位
+
+
+def test_regenerate_report_empty_day(env, capsys):
+    assert analyzer.regenerate_report(_DAY, _RUN_CFG) == 0
+    assert "没有已归档的帖子" in capsys.readouterr().out
+    assert not (analyzer.REPORT_DIR / f"{_DAY}.md").exists()
+
+
+def test_regenerate_report_invalid_date(env, capsys):
+    assert analyzer.regenerate_report("2026-02-30", _RUN_CFG) == 2
+    assert "日期格式无效" in capsys.readouterr().err

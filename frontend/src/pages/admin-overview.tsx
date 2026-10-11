@@ -1,31 +1,52 @@
-import { ExternalLink, Loader2, RefreshCw, RotateCcw, Square } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { ExternalLink, Loader2, RefreshCw, RotateCcw, Square, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardBody } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm";
 import { StatCard } from "@/components/ui/stat-card";
 import { useToast } from "@/components/ui/toast";
 import { PageHeader } from "@/components/layout/page-header";
-import { usePolling } from "@/hooks/usePrefs";
+import { usePolling, useTimezone } from "@/hooks/usePrefs";
 import { currentReportLang } from "@/i18n";
 import { ApiError, api } from "@/lib/api";
-import type { Summary, TaskItem } from "@/types";
+import { formatTime } from "@/lib/time";
+import type { ReportMeta, Summary, TaskItem } from "@/types";
 
-type RunMode = "today" | "full";
+type RunMode = "today" | "full" | "date";
 
-/** 管理总览（/admin）：数据概览 + 触发分析 + 运行中状态；报告浏览在公开页 /reports */
+/** 同一份报告（基名相同）的 zh/en 文件合并展示 */
+interface ReportGroup {
+  name: string;
+  kind: "daily" | "full";
+  langs: ("zh" | "en")[];
+  updated_at: number | null;
+  size: number;
+}
+
+function formatSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** 管理总览（/admin）：数据概览 + 触发分析 + 运行中状态 + 报告管理（删除 / 按日重跑） */
 export function AdminOverview() {
   const { t } = useTranslation();
+  const tz = useTimezone();
   const toast = useToast();
   const navigate = useNavigate();
 
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [reports, setReports] = useState<ReportMeta[] | null>(null);
   const [running, setRunning] = useState<TaskItem | null>(null);
   const [triggerMode, setTriggerMode] = useState<RunMode | null>(null);
   const [stopOpen, setStopOpen] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<ReportGroup | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const runningIdRef = useRef<string | null>(null);
   const triggerModeRef = useRef<RunMode | null>(null);
 
@@ -38,21 +59,48 @@ export function AdminOverview() {
     }
   }, []);
 
+  const loadReports = useCallback(async () => {
+    try {
+      const d = await api.reports();
+      setReports(d.reports);
+    } catch {
+      // 报告列表失败不阻塞页面，刷新按钮可重试
+    }
+  }, []);
+
   useEffect(() => {
     void loadSummary();
-  }, [loadSummary]);
+    void loadReports();
+  }, [loadSummary, loadReports]);
+
+  /** 按基名分组：同一日期的 zh/en 合并为一行 */
+  const reportGroups = useMemo(() => {
+    const map = new Map<string, ReportGroup>();
+    for (const r of reports ?? []) {
+      const g = map.get(r.name);
+      if (g) {
+        g.langs.push(r.lang);
+        g.updated_at = Math.max(g.updated_at ?? 0, r.updated_at ?? 0);
+        g.size += r.size;
+      } else {
+        map.set(r.name, { name: r.name, kind: r.kind, langs: [r.lang], updated_at: r.updated_at, size: r.size });
+      }
+    }
+    return [...map.values()];
+  }, [reports]);
 
   // ---------- 触发运行 ----------
 
   const startRun = useCallback(
-    async (m: RunMode) => {
+    async (m: RunMode, date?: string, lang?: "zh" | "en") => {
       try {
-        const data = await api.run(m, currentReportLang());
+        const data = await api.run(m, lang ?? currentReportLang(), date);
         runningIdRef.current = data.task.id;
         setRunning(data.task);
         setTriggerMode(m);
         triggerModeRef.current = m;
-        toast.push("info", m === "full" ? t("reports.startSuccessFull") : t("reports.startSuccessToday"));
+        if (m === "date") toast.push("info", t("reports.regenStarted", { date: date ?? "" }));
+        else toast.push("info", m === "full" ? t("reports.startSuccessFull") : t("reports.startSuccessToday"));
       } catch (e) {
         if (e instanceof ApiError) {
           if (e.code === "no_api_key") {
@@ -88,11 +136,15 @@ export function AdminOverview() {
       }
       runningIdRef.current = null;
       setRunning(null);
-      const mode = triggerModeRef.current;
       setTriggerMode(null);
       triggerModeRef.current = null;
       if (current.status === "succeeded") {
-        toast.push("success", mode === "full" ? t("reports.startSuccessFull") : t("reports.startSuccessToday"));
+        if (current.mode === "date") {
+          toast.push("success", t("reports.regenDone", { date: current.date ?? "" }));
+          await loadReports();
+        } else {
+          toast.push("success", current.mode === "full" ? t("reports.startSuccessFull") : t("reports.startSuccessToday"));
+        }
       } else if (current.status === "interrupted") {
         toast.push("info", t("reports.taskStopped"));
       } else {
@@ -106,6 +158,26 @@ export function AdminOverview() {
   );
 
   const runDisabled = running != null;
+
+  /** 重跑语言：该日期只有一种语言时沿用，中英都有时用当前界面语言 */
+  const groupLang = (g: ReportGroup): "zh" | "en" => (g.langs.length === 1 ? g.langs[0] : currentReportLang());
+
+  const onDelete = useCallback(async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await api.deleteReport(deleteTarget.name);
+      toast.push("success", t("reports.deleteDone"));
+      await loadReports();
+      await loadSummary();
+    } catch (e) {
+      if (e instanceof ApiError && e.code === "task_running") toast.push("warn", t("reports.taskRunningError"));
+      else toast.push("error", t("reports.deleteFail"));
+    } finally {
+      setDeleting(false);
+      setDeleteTarget(null);
+    }
+  }, [deleteTarget, loadReports, loadSummary, t, toast]);
 
   return (
     <div className="space-y-6">
@@ -154,7 +226,11 @@ export function AdminOverview() {
             <p className="text-sm font-medium text-brand-700 dark:text-brand-300">
               {t("reports.runningBannerTitle")}
               <Badge variant="brand" className="ml-2">
-                {running.mode === "full" ? t("tasks.modeFull") : t("tasks.modeToday")}
+                {running.mode === "full"
+                  ? t("tasks.modeFull")
+                  : running.mode === "date"
+                    ? t("tasks.modeDate")
+                    : t("tasks.modeToday")}
               </Badge>
             </p>
             <p className="mt-0.5 text-xs text-brand-700/80 dark:text-brand-300/80">{t("reports.runningBannerDesc")}</p>
@@ -222,6 +298,79 @@ export function AdminOverview() {
         />
       </div>
 
+      {/* 报告管理：删除 / 按日重跑 */}
+      <Card>
+        <CardBody>
+          <div className="mb-2 flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold text-ink-900 dark:text-surface-0">{t("admin.reportsTitle")}</h2>
+              <p className="mt-0.5 text-xs leading-5 text-ink-400 dark:text-surface-4">{t("admin.reportsDesc")}</p>
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<RefreshCw className="h-3.5 w-3.5" aria-hidden="true" />}
+              onClick={() => void loadReports()}
+            >
+              {t("common.refresh")}
+            </Button>
+          </div>
+
+          {reports != null && reportGroups.length === 0 ? (
+            <p className="py-6 text-center text-sm text-ink-400 dark:text-surface-4">{t("admin.reportsEmpty")}</p>
+          ) : (
+            <ul className="divide-y divide-surface-3 dark:divide-ink-900">
+              {reportGroups.map((g) => (
+                <li key={g.name} className="flex flex-wrap items-center gap-3 py-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-sm text-ink-900 dark:text-surface-0">
+                        {g.kind === "full" ? "analysis" : g.name}
+                      </span>
+                      <Badge variant="neutral">
+                        {g.kind === "full" ? t("reports.tabFull") : t("reports.tabDaily")}
+                      </Badge>
+                      {g.langs.map((l) => (
+                        <Badge key={l} variant="brand">
+                          {l === "zh" ? t("tasks.langZh") : t("tasks.langEn")}
+                        </Badge>
+                      ))}
+                    </div>
+                    <p className="mt-0.5 text-xs text-ink-400 dark:text-surface-4">
+                      {g.updated_at != null ? formatTime(g.updated_at, tz) : ""}
+                      {g.size > 0 ? ` · ${formatSize(g.size)}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon={<RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
+                      disabled={runDisabled}
+                      onClick={() =>
+                        void startRun(g.kind === "full" ? "full" : "date", g.kind === "full" ? undefined : g.name, groupLang(g))
+                      }
+                    >
+                      {t("reports.regenAction")}
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<Trash2 className="h-3.5 w-3.5" aria-hidden="true" />}
+                      disabled={runDisabled}
+                      className="text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-900"
+                      onClick={() => setDeleteTarget(g)}
+                    >
+                      {t("common.delete")}
+                    </Button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </CardBody>
+      </Card>
+
       <div className="rounded-xl border border-surface-3 bg-surface-1 p-4 text-sm text-ink-600 dark:border-ink-700 dark:bg-ink-900 dark:text-surface-4">
         <p className="flex items-center gap-2">
           <ExternalLink className="h-4 w-4 shrink-0 text-ink-400 dark:text-surface-4" aria-hidden="true" />
@@ -261,6 +410,19 @@ export function AdminOverview() {
             })
             .finally(() => setStopping(false));
         }}
+      />
+
+      <ConfirmDialog
+        open={deleteTarget != null}
+        onOpenChange={(open) => {
+          if (!open) setDeleteTarget(null);
+        }}
+        title={t("reports.deleteConfirmTitle")}
+        message={t("reports.deleteConfirmMessage", { name: deleteTarget?.name ?? "" })}
+        confirmLabel={t("common.delete")}
+        danger
+        confirmLoading={deleting}
+        onConfirm={() => void onDelete()}
       />
     </div>
   );

@@ -4,6 +4,7 @@
 用法：
     python3 analyzer.py          # 默认：自动增量爬取 + 增量分析（数据为空时自动全量）
     python3 analyzer.py --full   # 强制全量：自动爬取 + 重分析全部帖子
+    python3 analyzer.py --date YYYY-MM-DD   # 按日期重算某天报告（读归档帖子，不抓取）
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -326,6 +328,9 @@ _LLM: dict[str, str] = {"base_url": "", "model": "", "max_tokens": "4096"}
 # 分析/界面语言（main 里从 --lang / ANALYZE_LANG / 系统语言解析后填充），默认中文
 _LANG: str = "zh"
 
+# 历史重算的目标日期（--date，YYYY-MM-DD）；非空时 prompt 用该日期而非「今日」措辞
+_PERIOD: str | None = None
+
 
 def system_lang() -> str:
     """系统语言：LANG / LC_ALL / LC_MESSAGES 或 locale 设置；en* → en，其余 → zh。"""
@@ -385,6 +390,8 @@ _UI: dict[str, dict[str, str]] = {
         "no_new_plain": "没有新增帖子，无需分析。",
         "no_posts": "没有可分析的帖子。自动爬取未获取到数据——",
         "no_posts_hint": "可能是来源 API 限流或暂时不可用（如 V2EX 403），请稍后重试或检查网络。",
+        "bad_date": "[!] 日期格式无效：{date}（应为 YYYY-MM-DD）",
+        "date_no_posts": "该日期（{date}）没有已归档的帖子，无法重算报告。",
     },
     "en": {
         "no_api_key": (
@@ -419,6 +426,8 @@ _UI: dict[str, dict[str, str]] = {
             "The source API may be rate-limited or temporarily unavailable "
             "(e.g. V2EX 403). Retry later or check the network."
         ),
+        "bad_date": "[!] Invalid date: {date} (expected YYYY-MM-DD)",
+        "date_no_posts": "No archived posts found for {date}; cannot regenerate the report.",
     },
 }
 
@@ -798,6 +807,15 @@ def parse_multi(raw: str, lang: str = "zh") -> dict[str, str]:
     return out
 
 
+def _period_note(lang: str, incremental: bool) -> str:
+    """增量措辞：历史重算（_PERIOD 非空）用目标日期，否则用「今日」；全量为空。"""
+    if _PERIOD:
+        return f" (incremental analysis for {_PERIOD})" if lang == "en" else f"（本次为 {_PERIOD} 的增量分析）"
+    if not incremental:
+        return ""
+    return " (this is today's incremental analysis)" if lang == "en" else "（本次为今日新增分析）"
+
+
 def build_merge_prompt(results: list[str], incremental: bool, lang: str = "zh") -> str:
     """合并去重 prompt：把多批结果合并成条目列表。
 
@@ -811,7 +829,7 @@ def build_merge_prompt(results: list[str], incremental: bool, lang: str = "zh") 
     if not results:
         raise ValueError("build_merge_prompt 需要至少 1 个非空批次结果")
     if lang == "en":
-        note = " (this is today's incremental analysis)" if incremental else ""
+        note = _period_note(lang, incremental)
         body = "\n\n---\n\n".join(results)
         return f"""Below are analysis results from multiple batches; merge and dedupe them into an item list{note}.
 
@@ -825,7 +843,7 @@ Rules:
 - Answer in English; even if the original text is in Chinese, output in English
 
 {body}"""
-    note = "（本次为今日新增分析）" if incremental else ""
+    note = _period_note(lang, incremental)
     body = "\n\n---\n\n".join(results)
     return f"""以下是多批次的分析结果，请合并去重，输出条目列表{note}。
 
@@ -904,7 +922,7 @@ def build_consolidate_prompt(results: list[str], category_title: str, incrementa
     if not results:
         raise ValueError("build_consolidate_prompt 需要至少 1 个非空批次结果")
     if lang == "en":
-        note = " (this is today's incremental analysis)" if incremental else ""
+        note = _period_note(lang, incremental)
         body = "\n\n---\n\n".join(results)
         return f"""Below are "{category_title}" items from multiple batches{note}. Merge, dedupe, group in one pass.
 
@@ -921,7 +939,7 @@ Rules:
 ---Content to organize---
 
 {body}"""
-    note = "（本次为今日新增分析）" if incremental else ""
+    note = _period_note(lang, incremental)
     body = "\n\n---\n\n".join(results)
     return f"""以下是多批次分析得到的「{category_title}」条目{note}。请合并去重并分组整理，一次输出。
 
@@ -1190,19 +1208,24 @@ def build_report(
     return "\n".join(lines)
 
 
-def report_stem(incremental: bool, lang: str = "zh") -> str:
-    """报告基名：zh 沿用原名（analysis / YYYY-MM-DD），en 加 .en 后缀。"""
+def report_stem(incremental: bool, lang: str = "zh", date: str | None = None) -> str:
+    """报告基名：zh 沿用原名（analysis / YYYY-MM-DD），en 加 .en 后缀。
+
+    date 非空时用其作每日归档名（历史重算），否则用今天。
+    """
     suffix = ".en" if lang == "en" else ""
-    return (time.strftime("%Y-%m-%d") if incremental else "analysis") + suffix
+    return ((date or time.strftime("%Y-%m-%d")) if incremental else "analysis") + suffix
 
 
-def write_report(report: str, incremental: bool, lang: str = "zh") -> None:
+def write_report(report: str, incremental: bool, lang: str = "zh", date: str | None = None) -> None:
     """报告落盘：增量写入当日归档 data/analysis/YYYY-MM-DD[.en].md（每天一份，
-    同日多次运行刷新当天）；全量写入 analysis[.en].md 作为总览基线。"""
-    target = REPORT_DIR / f"{report_stem(incremental, lang)}.md"
+    同日多次运行刷新当天）；全量写入 analysis[.en].md 作为总览基线。
+    date 非空时改写该日期归档（历史重算）。原子写（tmp + replace），避免读到半截报告。"""
+    target = REPORT_DIR / f"{report_stem(incremental, lang, date)}.md"
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(target, "w", encoding="utf-8") as f:
-        f.write(report + "\n")
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(report + "\n", encoding="utf-8")
+    tmp.replace(target)
     print(_t(lang, "report_written", path=target.resolve()))
 
 
@@ -1217,7 +1240,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Shibei analysis (single entry): auto crawl → LLM distill → report; prints the absolute path."
         ),
     )
-    parser.add_argument("--full", action="store_true", help="强制全量分析（重跑全部帖子）/ force full re-analysis")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--full", action="store_true", help="强制全量分析（重跑全部帖子）/ force full re-analysis")
+    mode.add_argument(
+        "--date",
+        metavar="YYYY-MM-DD",
+        default=None,
+        help=(
+            "按日期重算某天的每日报告（读归档帖子，不重新抓取、不影响增量进度）/ "
+            "regenerate the daily report for a date from archived posts"
+        ),
+    )
     parser.add_argument(
         "--lang",
         choices=LANGS,
@@ -1294,6 +1327,74 @@ def _show_no_new(config: dict[str, Any], lang: str = "zh") -> None:
         print(_t(lang, "no_posts_hint"))
 
 
+def _parse_day(date: str) -> tuple[int, int]:
+    """把 YYYY-MM-DD 解析为 [当日 00:00, 次日 00:00) 的本地时间戳；非法抛 ValueError。
+
+    次日零点用 datetime + timedelta(days=1)，避免 DST 日直接 +86400 偏移一小时。
+    """
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise ValueError(date)
+    d = datetime.strptime(date, "%Y-%m-%d")
+    return int(d.timestamp()), int((d + timedelta(days=1)).timestamp())
+
+
+def _load_topics_for_day(
+    config: dict[str, Any], day_start: int, day_end: int
+) -> tuple[list[Post], dict[str, set[str]]]:
+    """加载某日（[day_start, day_end) 本地时间）创建的帖子，并返回实际命中的节点集合。
+
+    相比 _load_topics：since 下推到 load_topics，并在 created 上界过滤后再统计
+    source_nodes，避免「来源」行把当天无帖子的节点也列进去。
+    """
+    topics: list[Post] = []
+    source_nodes: dict[str, set[str]] = {}
+    for name in _enabled_sources(config):
+        source_dir = DATA_DIR / name
+        if not source_dir.is_dir():
+            continue
+        for node_dir in sorted(source_dir.iterdir()):
+            if not node_dir.is_dir():
+                continue
+            node_posts = [p for p in load_topics(node_dir, since=day_start) if p.created < day_end]
+            if node_posts:
+                source_nodes.setdefault(name, set()).add(node_dir.name)
+                topics.extend(node_posts)
+    return topics, source_nodes
+
+
+def regenerate_report(date: str, config: dict[str, Any]) -> int:
+    """按日期重算某天的每日报告：取已归档帖子中该日创建的部分，重新 LLM 分析并覆盖写回。
+
+    不重新抓取、不更新 state（历史重算不应影响增量进度）。仅使用当前 enabled 的来源。
+    """
+    global _PERIOD
+    try:
+        day_start, day_end = _parse_day(date)
+    except (ValueError, OSError, OverflowError):
+        print(_t(_LANG, "bad_date", date=date), file=sys.stderr)
+        return 2
+
+    topics, source_nodes = _load_topics_for_day(config, day_start, day_end)
+    if not topics:
+        print(_t(_LANG, "date_no_posts", date=date))
+        return 0
+
+    summary = ", ".join(f"{name}({', '.join(sorted(nodes))})" for name, nodes in source_nodes.items())
+    print(_t(_LANG, "posts_to_analyze", n=len(topics), summary=summary))
+    eval_cfg = load_evaluation(config)
+    eval_enabled = bool(eval_cfg.get("enabled", True))
+    reset_token_usage()
+    _PERIOD = date
+    try:
+        merged = analyze(topics, incremental=True, language=_LANG, eval_enabled=eval_enabled, eval_cfg=eval_cfg)
+    finally:
+        _PERIOD = None
+    report = build_report(merged, len(topics), summary, date, _LANG, eval_cfg=eval_cfg)
+    write_report(report, incremental=True, lang=_LANG, date=date)
+    print("\n" + report)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         return _main(argv)
@@ -1311,6 +1412,10 @@ def _main(argv: list[str] | None = None) -> int:
     check_env()  # 校验 OPENAI_API_KEY，缺失即退出（提示按 _LANG）
     config = load_config()
     _LLM.update(resolve_llm_config(config, _LANG))
+
+    # 历史重算：只读归档帖子重生成指定日期报告，不爬取、不动 state
+    if args.date:
+        return regenerate_report(args.date, config)
 
     # 自动爬取：某来源数据为空时重置其状态，让增量爬取退化为全量；否则只抓新增。
     # 记录 freshly_full —— 该来源刚被全量爬取，last_crawl 已被更新为当前时刻，

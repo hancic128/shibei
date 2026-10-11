@@ -21,7 +21,9 @@ export interface AppConfig {
 
 export interface TaskItem {
   id: string;
-  mode: "today" | "full";
+  mode: "today" | "full" | "date";
+  /** mode="date" 时重算的目标日期（YYYY-MM-DD），其余为 null */
+  date?: string | null;
   lang?: "zh" | "en";
   status: "running" | "succeeded" | "failed" | "interrupted";
   started_at: number | null;
