@@ -4,8 +4,9 @@ import { useTranslation } from "react-i18next";
 import { useNavigate } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardBody } from "@/components/ui/card";
+import { Card, CardHeader } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/ui/confirm";
+import { Pagination } from "@/components/ui/pagination";
 import { StatCard } from "@/components/ui/stat-card";
 import { useToast } from "@/components/ui/toast";
 import { PageHeader } from "@/components/layout/page-header";
@@ -16,6 +17,12 @@ import { formatTime } from "@/lib/time";
 import type { ReportMeta, Summary, TaskItem } from "@/types";
 
 type RunMode = "today" | "full" | "date";
+
+/** 报告管理列表每页条目数 */
+const PAGE_SIZE = 8;
+
+/** 语言徽标固定顺序（后端 glob 返回顺序不稳定，zh 在前保证同一日期各行一致） */
+const LANG_ORDER: Record<"zh" | "en", number> = { zh: 0, en: 1 };
 
 /** 同一份报告（基名相同）的 zh/en 文件合并展示 */
 interface ReportGroup {
@@ -47,6 +54,7 @@ export function AdminOverview() {
   const [stopping, setStopping] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ReportGroup | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [page, setPage] = useState(1);
   const runningIdRef = useRef<string | null>(null);
   const triggerModeRef = useRef<RunMode | null>(null);
 
@@ -86,8 +94,14 @@ export function AdminOverview() {
         map.set(r.name, { name: r.name, kind: r.kind, langs: [r.lang], updated_at: r.updated_at, size: r.size });
       }
     }
+    for (const g of map.values()) g.langs.sort((a, b) => LANG_ORDER[a] - LANG_ORDER[b]);
     return [...map.values()];
   }, [reports]);
+
+  /** 删除后条目变少时收敛页码，避免停在空页 */
+  const pageCount = Math.max(1, Math.ceil(reportGroups.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const pagedGroups = reportGroups.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
 
   // ---------- 触发运行 ----------
 
@@ -299,13 +313,11 @@ export function AdminOverview() {
       </div>
 
       {/* 报告管理：删除 / 按日重跑 */}
-      <Card>
-        <CardBody>
-          <div className="mb-2 flex items-start justify-between gap-3">
-            <div>
-              <h2 className="text-sm font-semibold text-ink-900 dark:text-surface-0">{t("admin.reportsTitle")}</h2>
-              <p className="mt-0.5 text-xs leading-5 text-ink-400 dark:text-surface-4">{t("admin.reportsDesc")}</p>
-            </div>
+      <Card className="overflow-hidden">
+        <CardHeader
+          title={t("admin.reportsTitle")}
+          desc={t("admin.reportsDesc")}
+          actions={
             <Button
               variant="ghost"
               size="sm"
@@ -314,61 +326,89 @@ export function AdminOverview() {
             >
               {t("common.refresh")}
             </Button>
-          </div>
+          }
+        />
 
-          {reports != null && reportGroups.length === 0 ? (
-            <p className="py-6 text-center text-sm text-ink-400 dark:text-surface-4">{t("admin.reportsEmpty")}</p>
-          ) : (
-            <ul className="divide-y divide-surface-3 dark:divide-ink-900">
-              {reportGroups.map((g) => (
-                <li key={g.name} className="flex flex-wrap items-center gap-3 py-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm text-ink-900 dark:text-surface-0">
-                        {g.kind === "full" ? "analysis" : g.name}
-                      </span>
-                      <Badge variant="neutral">
-                        {g.kind === "full" ? t("reports.tabFull") : t("reports.tabDaily")}
-                      </Badge>
-                      {g.langs.map((l) => (
-                        <Badge key={l} variant="brand">
-                          {l === "zh" ? t("tasks.langZh") : t("tasks.langEn")}
-                        </Badge>
-                      ))}
-                    </div>
-                    <p className="mt-0.5 text-xs text-ink-400 dark:text-surface-4">
-                      {g.updated_at != null ? formatTime(g.updated_at, tz) : ""}
-                      {g.size > 0 ? ` · ${formatSize(g.size)}` : ""}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      icon={<RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />}
-                      disabled={runDisabled}
-                      onClick={() =>
-                        void startRun(g.kind === "full" ? "full" : "date", g.kind === "full" ? undefined : g.name, groupLang(g))
-                      }
+        {reports == null ? (
+          <div className="space-y-3 px-6 py-2" aria-busy="true">
+            <div className="h-4 w-full animate-pulse rounded bg-surface-2 dark:bg-ink-900" />
+            <div className="h-4 w-2/3 animate-pulse rounded bg-surface-2 dark:bg-ink-900" />
+          </div>
+        ) : reportGroups.length === 0 ? (
+          <p className="px-6 py-8 text-center text-sm text-ink-400 dark:text-surface-4">{t("admin.reportsEmpty")}</p>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-y border-surface-3 bg-surface-1 text-left text-xs font-medium text-ink-500 dark:border-ink-900 dark:bg-ink-900 dark:text-surface-4">
+                    <th className="px-6 py-3 font-medium">{t("admin.colReport")}</th>
+                    <th className="px-4 py-3 font-medium">{t("admin.colUpdated")}</th>
+                    <th className="px-6 py-3 text-right font-medium">{t("admin.colActions")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pagedGroups.map((g) => (
+                    <tr
+                      key={g.name}
+                      className="border-b border-surface-3 last:border-0 hover:bg-surface-1 dark:border-ink-900 dark:hover:bg-ink-900"
                     >
-                      {t("reports.regenAction")}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      icon={<Trash2 className="h-3.5 w-3.5" aria-hidden="true" />}
-                      disabled={runDisabled}
-                      className="text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-900"
-                      onClick={() => setDeleteTarget(g)}
-                    >
-                      {t("common.delete")}
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardBody>
+                      <td className="px-6 py-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-mono text-ink-900 dark:text-surface-0">
+                            {g.kind === "full" ? "analysis" : g.name}
+                          </span>
+                          <Badge variant="neutral">
+                            {g.kind === "full" ? t("reports.tabFull") : t("reports.tabDaily")}
+                          </Badge>
+                          {g.langs.map((l) => (
+                            <Badge key={l} variant="brand">
+                              {l === "zh" ? t("tasks.langZh") : t("tasks.langEn")}
+                            </Badge>
+                          ))}
+                        </div>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-ink-500 dark:text-surface-4">
+                        {g.updated_at != null ? formatTime(g.updated_at, tz) : ""}
+                        {g.size > 0 ? ` · ${formatSize(g.size)}` : ""}
+                      </td>
+                      <td className="px-6 py-3 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            icon={<RotateCcw className="h-4 w-4" aria-hidden="true" />}
+                            disabled={runDisabled}
+                            onClick={() =>
+                              void startRun(
+                                g.kind === "full" ? "full" : "date",
+                                g.kind === "full" ? undefined : g.name,
+                                groupLang(g),
+                              )
+                            }
+                          >
+                            {t("reports.regenAction")}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            icon={<Trash2 className="h-4 w-4" aria-hidden="true" />}
+                            disabled={runDisabled}
+                            className="text-rose-600 hover:bg-rose-50 dark:text-rose-400 dark:hover:bg-rose-900"
+                            onClick={() => setDeleteTarget(g)}
+                          >
+                            {t("common.delete")}
+                          </Button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <Pagination page={currentPage} total={reportGroups.length} pageSize={PAGE_SIZE} onPageChange={setPage} />
+          </>
+        )}
       </Card>
 
       <div className="rounded-xl border border-surface-3 bg-surface-1 p-4 text-sm text-ink-600 dark:border-ink-700 dark:bg-ink-900 dark:text-surface-4">
